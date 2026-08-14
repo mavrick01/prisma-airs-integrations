@@ -1,0 +1,203 @@
+<!--
+╔══════════════════════════════════════════════════════════════════════════════╗
+║ PRISMA AIRS OAUTH TOKEN FRAGMENT                                            ║
+║ Version: 1.0.0                                                               ║
+║ Built for: Azure API Management (APIM)                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+DESCRIPTION:
+Fetches and caches a Prisma AIRS OAuth bearer token using a two-step flow:
+  1. Exchange service account credentials against Strata Cloud Manager (SCM) auth
+     to obtain a short-lived (15 min) SCM access token.
+  2. Use the SCM token to call the AIRS management API and obtain a 24-hour
+     AIRS OAuth token.
+
+The AIRS token is cached in APIM's internal cache with a 23-hour TTL so it
+is shared across all requests/sessions without hitting the auth endpoints on
+every call. When the cache entry is missing or expired a fresh token is fetched
+and stored.
+
+After this fragment executes, the context variable `PrismaAirsToken` holds the
+current AIRS OAuth token. The scan fragment (panw-airs-scan-v2.1.2) reads this
+variable when PrismaAirsAPI == "OAUTH" and sets Authorization: Bearer accordingly.
+
+NAMED VALUES REQUIRED (create these as Secret named values in APIM):
+  - panw-client-id      SCM service account Client ID (used for Basic auth to SCM)
+  - panw-client-secret  SCM service account Client Secret (used for Basic auth to SCM)
+  - panw-tsg            Strata Cloud Manager TSG ID
+  - panw-customer-app   The Application name exactly as defined in the AIRS API Application
+                        definition — passed as "customer_app" in the AIRS OAuth body
+
+REUSED NAMED VALUES (must already exist for the scan fragment):
+  - airs-api            Your static AIRS API key — reused here as "client_id" in the AIRS
+                        OAuth body (the field name is misleadingly named by AIRS; it expects
+                        the API key, not the SCM service account Client ID)
+
+NOTE ON panw-client-id vs AIRS client_id:
+  The AIRS OAuth endpoint body field named "client_id" is misleadingly named —
+  it is NOT the SCM service account Client ID (panw-client-id). It is the AIRS
+  API key (airs-api), which is reused here to avoid duplicating named values.
+  panw-customer-app must match the Application name exactly as registered in AIRS.
+
+USAGE:
+  Place this fragment in the inbound section BEFORE the scan fragment:
+
+  <inbound>
+      <set-variable name="PrismaAirsAPI" value="OAUTH" />
+      <include-fragment fragment-id="panw-airs-oauth" />
+      <include-fragment fragment-id="panw-airs-scan" />
+  </inbound>
+
+CACHING STRATEGY:
+  APIM internal cache (cache-store-value / cache-lookup-value) is used rather
+  than Named Values. Named Values are static configuration — they cannot be
+  written at runtime. The internal cache persists across requests and gateway
+  worker processes within an APIM instance, making it suitable for shared token
+  state. TTL is derived from the expires_in field in the AIRS OAuth response,
+  minus a 1-hour safety buffer (falls back to 7200s / 2h if absent).
+
+-->
+<fragment>
+	<!-- ============================================================================
+     PHASE 1: CACHE CHECK
+     ============================================================================ -->
+	<!-- Try to load a cached AIRS OAuth token. Key is scoped to TSG so multiple
+	     TSGs on the same gateway don't share tokens. -->
+	<cache-lookup-value key="@("panw-airs-oauth-token-" + "{{panw-tsg}}")" variable-name="PrismaAirsToken" />
+	<choose>
+		<when condition="@(context.Variables.GetValueOrDefault<string>("PrismaAirsToken") != null)">
+			<!-- Cache hit — token is still valid, nothing to do -->
+		</when>
+		<otherwise>
+			<!-- Cache miss — fetch a fresh token via the two-step flow below -->
+			<!-- ============================================================================
+             PHASE 2: SCM ACCESS TOKEN (15-minute short-lived token)
+             ============================================================================ -->
+			<!-- Step 1: Exchange service account credentials for an SCM bearer token.
+			     Uses HTTP Basic auth (client_id:client_secret) with form-encoded body. -->
+			<http-send-request response-variable-name="scmAuthResponse" timeout="15" ignore-error="true">
+				<set-url>https://auth.apps.paloaltonetworks.com/oauth2/access_token</set-url>
+				<set-method>POST</set-method>
+				<set-header name="Content-Type" exists-action="override">
+					<value>application/x-www-form-urlencoded</value>
+				</set-header>
+				<set-header name="Authorization" exists-action="override">
+					<!-- Basic auth: base64(client_id:client_secret) -->
+					<value>@{
+            string credentials = "{{panw-client-id}}" + ":" + "{{panw-client-secret}}";
+            string encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(credentials));
+            return "Basic " + encoded;
+        }</value>
+				</set-header>
+				<set-body>@("grant_type=client_credentials&scope=tsg_id:" + "{{panw-tsg}}")</set-body>
+			</http-send-request>
+			<!-- Validate SCM auth response -->
+			<choose>
+				<when condition="@(context.Variables.GetValueOrDefault<IResponse>("scmAuthResponse")?.StatusCode != 200)">
+					<!-- SCM auth failed — return a clear error rather than a cryptic 500 -->
+					<return-response>
+						<set-status code="502" reason="Bad Gateway" />
+						<set-header name="Content-Type" exists-action="override">
+							<value>application/json</value>
+						</set-header>
+						<set-body>@{
+                int code = context.Variables.GetValueOrDefault<IResponse>("scmAuthResponse")?.StatusCode ?? 0;
+                return new JObject(
+                    new JProperty("error", $"🛡️ PRISMA AIRS: SCM authentication failed (HTTP {code}). Check panw-client-id, panw-client-secret, and panw-tsg named values.")
+                ).ToString(Formatting.None);
+            }</set-body>
+					</return-response>
+				</when>
+			</choose>
+			<!-- Extract SCM access_token from response -->
+			<set-variable name="scmAccessToken" value="@{
+            var body = context.Variables.GetValueOrDefault<IResponse>("scmAuthResponse").Body.As<JObject>(preserveContent: true);
+            return body["access_token"]?.ToString();
+        }" />
+			<choose>
+				<when condition="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault<string>("scmAccessToken")))">
+					<return-response>
+						<set-status code="502" reason="Bad Gateway" />
+						<set-header name="Content-Type" exists-action="override">
+							<value>application/json</value>
+						</set-header>
+						<set-body>{"error": "🛡️ PRISMA AIRS: SCM auth response did not contain an access_token field."}</set-body>
+					</return-response>
+				</when>
+			</choose>
+			<!-- ============================================================================
+             PHASE 3: AIRS OAUTH TOKEN (24-hour token)
+             ============================================================================ -->
+			<!-- Step 2: Use the SCM token to obtain a 3-hour AIRS OAuth token.
+			     airs-api → "client_id" body field (misleadingly named by AIRS; reuses the
+			     existing named value rather than duplicating it as panw-client-app).
+			     panw-customer-app → "customer_app", must match the Application name exactly
+			     as defined in the AIRS API Application definition. -->
+			<http-send-request response-variable-name="airsOauthResponse" timeout="15" ignore-error="true">
+				<set-url>https://api.sase.paloaltonetworks.com/aisec/v1/mgmt/oauth/client_credential/accesstoken?tokenTtlInterval=3&amp;tokenTtlUnit=hours</set-url>
+				<set-method>POST</set-method>
+				<set-header name="Content-Type" exists-action="override">
+					<value>application/json</value>
+				</set-header>
+				<set-header name="Accept" exists-action="override">
+					<value>application/json</value>
+				</set-header>
+				<set-header name="Authorization" exists-action="override">
+					<value>@("Bearer " + context.Variables.GetValueOrDefault<string>("scmAccessToken"))</value>
+				</set-header>
+				<set-body>@{
+            return new JObject(
+                new JProperty("client_id", "{{airs-api}}"),
+                new JProperty("customer_app", "{{panw-customer-app}}")
+            ).ToString(Formatting.None);
+        }</set-body>
+			</http-send-request>
+			<!-- Validate AIRS OAuth response -->
+			<choose>
+				<when condition="@(context.Variables.GetValueOrDefault<IResponse>("airsOauthResponse")?.StatusCode != 200)">
+					<return-response>
+						<set-status code="502" reason="Bad Gateway" />
+						<set-header name="Content-Type" exists-action="override">
+							<value>application/json</value>
+						</set-header>
+						<set-body>@{
+                int code = context.Variables.GetValueOrDefault<IResponse>("airsOauthResponse")?.StatusCode ?? 0;
+                return new JObject(
+                    new JProperty("error", $"🛡️ PRISMA AIRS: AIRS OAuth token fetch failed (HTTP {code}). Check airs-api / panw-customer-app named values and SCM service account permissions.")
+                ).ToString(Formatting.None);
+            }</set-body>
+					</return-response>
+				</when>
+			</choose>
+			<!-- Extract AIRS token and TTL from response -->
+			<set-variable name="airsOauthBody" value="@(context.Variables.GetValueOrDefault<IResponse>("airsOauthResponse").Body.As<JObject>(preserveContent: true))" />
+			<set-variable name="PrismaAirsToken" value="@(context.Variables.GetValueOrDefault<JObject>("airsOauthBody")?["access_token"]?.ToString())" />
+			<choose>
+				<when condition="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault<string>("PrismaAirsToken")))">
+					<return-response>
+						<set-status code="502" reason="Bad Gateway" />
+						<set-header name="Content-Type" exists-action="override">
+							<value>application/json</value>
+						</set-header>
+						<set-body>{"error": "🛡️ PRISMA AIRS: AIRS OAuth response did not contain an access_token field."}</set-body>
+					</return-response>
+				</when>
+			</choose>
+			<!-- ============================================================================
+             PHASE 4: CACHE STORE
+             ============================================================================ -->
+			<!-- Derive cache TTL from expires_in (returned as a string of seconds), minus a
+			     1-hour safety buffer so the token is never used in its last hour.
+			     Falls back to 7200 (2h) if expires_in is absent or unparseable, which is
+			     conservative for the 3-hour token we requested. -->
+			<set-variable name="airsOauthCacheTtl" value="@{
+            string raw = context.Variables.GetValueOrDefault<JObject>("airsOauthBody")?["expires_in"]?.ToString();
+            if (int.TryParse(raw, out int expiresIn) && expiresIn > 3600) {
+                return expiresIn - 3600;
+            }
+            return 7200;
+        }" />
+			<cache-store-value key="@("panw-airs-oauth-token-" + "{{panw-tsg}}")" value="@(context.Variables.GetValueOrDefault<string>("PrismaAirsToken"))" duration="@((int)context.Variables["airsOauthCacheTtl"])" />
+		</otherwise>
+	</choose>
+</fragment>

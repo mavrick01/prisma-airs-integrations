@@ -1,7 +1,7 @@
 <!--
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║ PRISMA AIRS SECURITY SCANNING FRAGMENT                                      ║
-║ Version: 2.1.0                                                               ║
+║ Version: 2.1.2                                                               ║
 ║ Built for: Azure API Management (APIM)                                      ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -28,15 +28,21 @@ Named Values (must exist in APIM):
   - AIRS-API (required): Prisma AIRS API key (used as fallback if PrismaAirsAPI not set)
 
 Context Variables (set before fragment inclusion):
-  - PrismaAirsAPI (string, optional): Override AIRS API key per request (takes priority over named value)
+  - PrismaAirsAPI (string, optional): Override AIRS API key per request (takes priority over named value).
+    Set to the literal string "OAUTH" to use OAuth bearer token mode instead of x-pan-token.
+    In OAuth mode, include the panw-airs-oauth fragment before this one — it will set PrismaAirsToken.
+  - PrismaAirsToken (string, set by panw-airs-oauth): Bearer token used when PrismaAirsAPI == "OAUTH".
   - PrismaAirsEndpoint (string, optional): Prisma AIRS endpoint
     Default: service.api.aisecurity.paloaltonetworks.com
   - scanType (string): "prompt", "response", or "both" (default: "prompt")
   - currentProfile (string): AIRS profile name (default: "example-profile")
+  - currentProfileUUID (string, optional): AIRS profile UUID (takes priority over currentProfile if defined)
   - toolProfile (string): AIRS profile for tool events (default: currentProfile)
+  - toolProfileUUID (string, optional): AIRS profile UUID for tool events (takes priority over toolProfile if defined)
   - scanTools (boolean): Scan tool results (default: true)
   - appName (string): Application name (default: "Gateway")
-  - FailOpen (boolean): Allow on AIRS failure (default: false)
+  - failOpen (boolean): Allow on AIRS failure (default: false)
+    Note: FailOpen (uppercase) is also supported for backward compatibility
   - airsDescriptions (JObject): Custom threat descriptions (optional)
   - agentID (string): Optional agent identifier
   - agentVersion (string): Optional agent version
@@ -119,15 +125,28 @@ TOOL CALL HANDLING:
     return !string.IsNullOrEmpty(namedValue) ? namedValue : null;
 }" />
 	<!-- Load configuration variables with defaults -->
-	<!-- Backward-compat: accept both ScanType (v2 convention) and scanType (v2.1). ScanType wins when a v2-era policy sets it per-phase. -->
-	<set-variable name="scanType" value="@(context.Variables.GetValueOrDefault<string>("ScanType", context.Variables.GetValueOrDefault<string>("scanType", "prompt")))" />
+	<!-- v2.1.2: scanType (lowercase) is preferred; ScanType (uppercase) is backward compatibility -->
+	<set-variable name="scanType" value="@(context.Variables.GetValueOrDefault<string>("scanType", context.Variables.GetValueOrDefault<string>("ScanType", "prompt")))" />
 	<set-variable name="currentProfile" value="@(context.Variables.GetValueOrDefault<string>("currentProfile", "example-profile"))" />
+	<set-variable name="currentProfileUUID" value="@(context.Variables.GetValueOrDefault<string>("currentProfileUUID", null))" />
 	<set-variable name="toolProfile" value="@(context.Variables.GetValueOrDefault<string>("toolProfile", (string)context.Variables["currentProfile"]))" />
+	<set-variable name="toolProfileUUID" value="@(context.Variables.GetValueOrDefault<string>("toolProfileUUID", null))" />
 	<!-- Backward-compat: Convert.ToBoolean accepts string "true"/"false" as well as a real bool (strict GetValueOrDefault<bool> throws 500 on a string). -->
 	<set-variable name="scanTools" value="@(Convert.ToBoolean(context.Variables.GetValueOrDefault<object>("scanTools", true)))" />
 	<set-variable name="appName" value="@(context.Variables.GetValueOrDefault<string>("appName", "Gateway"))" />
-	<!-- Backward-compat: Convert.ToBoolean accepts string "true"/"false" as well as a real bool (strict GetValueOrDefault<bool> throws 500 on a string). -->
-	<set-variable name="FailOpen" value="@(Convert.ToBoolean(context.Variables.GetValueOrDefault<object>("FailOpen", false)))" />
+	<!-- Backward-compat: failOpen (lowercase) is preferred, but FailOpen (uppercase) is also supported. Convert.ToBoolean accepts string "true"/"false" as well as a real bool (strict GetValueOrDefault<bool> throws 500 on a string). -->
+	<set-variable name="FailOpen" value="@{
+	    // Priority 1: Check for failOpen (lowercase - preferred)
+	    object failOpenLower = context.Variables.GetValueOrDefault<object>("failOpen", null);
+	    if (failOpenLower != null) { return Convert.ToBoolean(failOpenLower); }
+
+	    // Priority 2: Fall back to FailOpen (uppercase - backward compatibility)
+	    object failOpenUpper = context.Variables.GetValueOrDefault<object>("FailOpen", null);
+	    if (failOpenUpper != null) { return Convert.ToBoolean(failOpenUpper); }
+
+	    // Default: false (fail-closed)
+	    return false;
+	}" />
 	<!-- Optional agent metadata -->
 	<set-variable name="agentId" value="@{
     // Priority 1: Context variable (explicit override)
@@ -155,7 +174,7 @@ TOOL CALL HANDLING:
 	<set-variable name="agentVersion" value="@(context.Variables.GetValueOrDefault<string>("AgentVersion", null))" />
 	<!-- Merge custom descriptions with defaults -->
 	<set-variable name="finalDescriptions" value="@{
-    var defaults = (JObject)context.Variables["threatDescriptions"];
+    var defaults = context.Variables.GetValueOrDefault<JObject>("threatDescriptions");
     var custom = context.Variables.GetValueOrDefault<JObject>("airsDescriptions", null);
 
     if (custom != null) {
@@ -167,13 +186,16 @@ TOOL CALL HANDLING:
 
     return defaults;
 }" />
-	<!-- Validate API key configuration -->
+	<!-- Detect OAuth mode: PrismaAirsAPI == "OAUTH" means the panw-airs-oauth fragment
+	     has already run and stored the bearer token in PrismaAirsToken. In this mode
+	     there is no x-pan-token to validate — skip the key check entirely. -->
+	<set-variable name="airsOAuthMode" value="@(string.Equals(context.Variables.GetValueOrDefault<string>("PrismaAirsAPI"), "OAUTH", StringComparison.OrdinalIgnoreCase))" />
+	<!-- Validate API key configuration (skipped in OAuth mode) -->
 	<choose>
 		<when condition="@{
-        string apiKey = (string)context.Variables["airsApiKey"];
+        if ((bool)context.Variables["airsOAuthMode"]) { return false; }
+        string apiKey = context.Variables.GetValueOrDefault<string>("airsApiKey");
         bool failOpen = (bool)context.Variables["FailOpen"];
-
-        // If no API key and fail-closed mode, block immediately
         return string.IsNullOrEmpty(apiKey) && !failOpen;
     }">
 			<!-- Block due to missing API key in fail-closed mode -->
@@ -476,7 +498,7 @@ TOOL CALL HANDLING:
 }" />
 			<!-- Build base AIRS request with metadata -->
 			<set-variable name="airsRequestBase" value="@{
-    var body = (JObject)context.Variables["requestBodyJson"];
+    var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
     string apiType = (string)context.Variables["apiType"];
     string model = "unknown-model";
 
@@ -526,10 +548,21 @@ TOOL CALL HANDLING:
 
     // Select profile based on API type
     string profileName;
+    string profileUUID;
     if (apiType == "mcp") {
         profileName = (string)context.Variables["toolProfile"];
+        profileUUID = (string)context.Variables["toolProfileUUID"];
     } else {
         profileName = (string)context.Variables["currentProfile"];
+        profileUUID = (string)context.Variables["currentProfileUUID"];
+    }
+
+    // Build ai_profile object - use profile_id if UUID is defined, otherwise use profile_name
+    JObject aiProfile;
+    if (!string.IsNullOrEmpty(profileUUID)) {
+        aiProfile = new JObject(new JProperty("profile_id", profileUUID));
+    } else {
+        aiProfile = new JObject(new JProperty("profile_name", profileName));
     }
 
     // Build metadata object
@@ -555,9 +588,7 @@ TOOL CALL HANDLING:
     return new JObject(
         new JProperty("tr_id", (string)context.Variables["transactionId"]),
         new JProperty("session_id", (string)context.Variables["sessionId"]),
-        new JProperty("ai_profile", new JObject(
-            new JProperty("profile_name", profileName)
-        )),
+        new JProperty("ai_profile", aiProfile),
         new JProperty("metadata", metadata)
     );
 }" />
@@ -569,8 +600,8 @@ TOOL CALL HANDLING:
 				<when condition="@((string)context.Variables["apiType"] == "mcp")">
 					<set-variable name="airsRequestBody" value="@{
             try {
-                var baseReq = (JObject)context.Variables["airsRequestBase"];
-                var body = (JObject)context.Variables["requestBodyJson"];
+                var baseReq = context.Variables.GetValueOrDefault<JObject>("airsRequestBase");
+                var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
                 var contents = new JArray();
 
                 // Extract tool metadata
@@ -643,7 +674,7 @@ TOOL CALL HANDLING:
 
                 contents.Add(new JObject(new JProperty("tool_event", toolEvent)));
                 baseReq["contents"] = contents;
-                return baseReq.ToString(Newtonsoft.Json.Formatting.None);
+                return baseReq.ToString(Formatting.None);
             } catch (Exception ex) {
                 return null;
             }
@@ -655,8 +686,8 @@ TOOL CALL HANDLING:
 				<when condition="@((string)context.Variables["apiType"] == "gemini")">
 					<set-variable name="airsRequestBody" value="@{
             try {
-                var baseReq = (JObject)context.Variables["airsRequestBase"];
-                var body = (JObject)context.Variables["requestBodyJson"];
+                var baseReq = context.Variables.GetValueOrDefault<JObject>("airsRequestBase");
+                var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
                 string scanType = (string)context.Variables["scanType"];
                 var contents = new JArray();
 
@@ -788,7 +819,7 @@ TOOL CALL HANDLING:
                 }
 
                 baseReq["contents"] = contents;
-                return baseReq.ToString(Newtonsoft.Json.Formatting.None);
+                return baseReq.ToString(Formatting.None);
             } catch (Exception ex) {
                 return null;
             }
@@ -800,8 +831,8 @@ TOOL CALL HANDLING:
 				<otherwise>
 					<set-variable name="airsRequestBody" value="@{
             try {
-                var baseReq = (JObject)context.Variables["airsRequestBase"];
-                var body = (JObject)context.Variables["requestBodyJson"];
+                var baseReq = context.Variables.GetValueOrDefault<JObject>("airsRequestBase");
+                var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
                 string scanType = (string)context.Variables["scanType"];
                 bool scanTools = (bool)context.Variables["scanTools"];
                 bool isCC = (bool)context.Variables["isClaudeCode"];
@@ -1025,7 +1056,7 @@ TOOL CALL HANDLING:
                 }
 
                 baseReq["contents"] = contents;
-                return baseReq.ToString(Newtonsoft.Json.Formatting.None);
+                return baseReq.ToString(Formatting.None);
             } catch (Exception ex) {
                 return null;
             }
@@ -1054,29 +1085,39 @@ TOOL CALL HANDLING:
      PHASE 5: AIRS SECURITY SCAN
      ============================================================================ -->
 					<!-- Call AIRS API for security scanning -->
-					<send-request mode="new" response-variable-name="airsResponse" timeout="10" ignore-error="false">
+					<http-send-request response-variable-name="airsResponse" timeout="10" ignore-error="true">
 						<set-url>@("https://" + (string)context.Variables["airsEndpoint"] + "/v1/scan/sync/request")</set-url>
 						<set-method>POST</set-method>
-						<set-header name="x-pan-token" exists-action="override">
-							<value>@((string)context.Variables["airsApiKey"])</value>
-						</set-header>
+						<!-- Auth: OAuth mode sends Bearer token; static key mode sends x-pan-token -->
+						<choose>
+							<when condition="@((bool)context.Variables["airsOAuthMode"])">
+								<set-header name="Authorization" exists-action="override">
+									<value>@("Bearer " + context.Variables.GetValueOrDefault<string>("PrismaAirsToken"))</value>
+								</set-header>
+							</when>
+							<otherwise>
+								<set-header name="x-pan-token" exists-action="override">
+									<value>@(context.Variables.GetValueOrDefault<string>("airsApiKey"))</value>
+								</set-header>
+							</otherwise>
+						</choose>
 						<set-header name="Content-Type" exists-action="override">
 							<value>application/json</value>
 						</set-header>
 						<set-body>@((string)context.Variables["airsRequestBody"])</set-body>
-					</send-request>
+					</http-send-request>
 					<!-- Parse AIRS response -->
 					<choose>
-						<when condition="@(context.Variables.ContainsKey("airsResponse") && ((IResponse)context.Variables["airsResponse"]).StatusCode == 200)">
+						<when condition="@(context.Variables.GetValueOrDefault<IResponse>("airsResponse")?.StatusCode == 200)">
 							<!-- AIRS call succeeded, parse response -->
-							<set-variable name="airsResult" value="@(((IResponse)context.Variables["airsResponse"]).Body.As<JObject>(preserveContent: true))" />
+							<set-variable name="airsResult" value="@(context.Variables.GetValueOrDefault<IResponse>("airsResponse").Body.As<JObject>(preserveContent: true))" />
 							<!-- Extract action and masking flags -->
-							<set-variable name="airsAction" value="@(((JObject)context.Variables["airsResult"])["action"]?.ToString())" />
-							<set-variable name="hasPromptMask" value="@(((JObject)context.Variables["airsResult"]).ContainsKey("prompt_masked_data"))" />
-							<set-variable name="hasResponseMask" value="@(((JObject)context.Variables["airsResult"]).ContainsKey("response_masked_data"))" />
+							<set-variable name="airsAction" value="@(context.Variables.GetValueOrDefault<JObject>("airsResult")?["action"]?.ToString())" />
+							<set-variable name="hasPromptMask" value="@(context.Variables.GetValueOrDefault<JObject>("airsResult")?.ContainsKey("prompt_masked_data") == true)" />
+							<set-variable name="hasResponseMask" value="@(context.Variables.GetValueOrDefault<JObject>("airsResult")?.ContainsKey("response_masked_data") == true)" />
 							<!-- Tool masking flags (for MCP and tool events) -->
 							<set-variable name="hasToolInputMask" value="@{
-            var result = (JObject)context.Variables["airsResult"];
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
             var toolDetected = result["tool_detected"];
             if (toolDetected == null) { return false; }
 
@@ -1089,7 +1130,7 @@ TOOL CALL HANDLING:
             return entries[0]["masked_data"] != null;
         }" />
 							<set-variable name="hasToolOutputMask" value="@{
-            var result = (JObject)context.Variables["airsResult"];
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
             var toolDetected = result["tool_detected"];
             if (toolDetected == null) { return false; }
 
@@ -1109,10 +1150,10 @@ TOOL CALL HANDLING:
 								<!-- BLOCK: Content is malicious, return error -->
 								<when condition="@((string)context.Variables["airsAction"] == "block")">
 									<set-variable name="errorBody" value="@{
-            var result = (JObject)context.Variables["airsResult"];
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
             string scanType = (string)context.Variables["scanType"];
             string apiType = (string)context.Variables["apiType"];
-            var descriptions = (JObject)context.Variables["finalDescriptions"];
+            var descriptions = context.Variables.GetValueOrDefault<JObject>("finalDescriptions");
 
             if (apiType == "mcp") {
                 // MCP JSON-RPC error format
@@ -1145,7 +1186,7 @@ TOOL CALL HANDLING:
                         new JProperty("code", -32000),
                         new JProperty("message", "🛡️ PRISMA AIRS SECURITY ALERT: MCP tool call blocked" + threatInfo)
                     ))
-                ).ToString(Newtonsoft.Json.Formatting.None);
+                ).ToString(Formatting.None);
             } else {
                 // LLM/Gemini JSON error format
                 var response = new JObject();
@@ -1175,11 +1216,11 @@ TOOL CALL HANDLING:
                 }
 
                 response.Add("details", details);
-                return response.ToString(Newtonsoft.Json.Formatting.None);
+                return response.ToString(Formatting.None);
             }
         }" />
 									<choose>
-										<when condition="@((bool)context.Variables["isClaudeCode"] && (string)context.Variables["apiType"] == "llm" && context.Variables.ContainsKey("requestBodyJson") && context.Variables["requestBodyJson"] != null && ((JObject)context.Variables["requestBodyJson"])["stream"] != null && (bool)((JObject)context.Variables["requestBodyJson"])["stream"])">
+										<when condition="@((bool)context.Variables["isClaudeCode"] && (string)context.Variables["apiType"] == "llm" && context.Variables.GetValueOrDefault<JObject>("requestBodyJson")?["stream"]?.Value<bool>() == true)">
 											<!-- Claude Code (streaming): return a 200 SSE assistant refusal so the session keeps going. AIRS still logged/enforced the block; this only changes how the client is told. -->
 											<return-response>
 												<set-status code="200" reason="OK" />
@@ -1190,8 +1231,8 @@ TOOL CALL HANDLING:
 													<value>true</value>
 												</set-header>
 												<set-body>@{
-            var result = (JObject)context.Variables["airsResult"];
-            var descriptions = (JObject)context.Variables["finalDescriptions"];
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
+            var descriptions = context.Variables.GetValueOrDefault<JObject>("finalDescriptions");
             string scanType = (string)context.Variables["scanType"];
             var detected = (scanType == "response" ? result["response_detected"] : result["prompt_detected"]) as JObject;
             var threatSb = new System.Text.StringBuilder();
@@ -1207,7 +1248,7 @@ TOOL CALL HANDLING:
             }
             string notice = "🛡️ PRISMA AIRS SECURITY ALERT: " + (scanType == "response" ? "RESPONSE BLOCKED" : "REQUEST BLOCKED") + (threatSb.Length > 0 ? (": " + threatSb.ToString()) : "");
 
-            var reqBody = (JObject)context.Variables["requestBodyJson"];
+            var reqBody = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
             string model = (reqBody != null && reqBody["model"] != null) ? reqBody["model"].ToString() : "claude";
 
             var msgStart = new JObject(new JProperty("type", "message_start"), new JProperty("message", new JObject(
@@ -1226,12 +1267,12 @@ TOOL CALL HANDLING:
             var msgStop = new JObject(new JProperty("type", "message_stop"));
 
             var sb = new System.Text.StringBuilder();
-            sb.Append("event: message_start\ndata: ").Append(msgStart.ToString(Newtonsoft.Json.Formatting.None)).Append("\n\n");
-            sb.Append("event: content_block_start\ndata: ").Append(cbStart.ToString(Newtonsoft.Json.Formatting.None)).Append("\n\n");
-            sb.Append("event: content_block_delta\ndata: ").Append(cbDelta.ToString(Newtonsoft.Json.Formatting.None)).Append("\n\n");
-            sb.Append("event: content_block_stop\ndata: ").Append(cbStop.ToString(Newtonsoft.Json.Formatting.None)).Append("\n\n");
-            sb.Append("event: message_delta\ndata: ").Append(msgDelta.ToString(Newtonsoft.Json.Formatting.None)).Append("\n\n");
-            sb.Append("event: message_stop\ndata: ").Append(msgStop.ToString(Newtonsoft.Json.Formatting.None)).Append("\n\n");
+            sb.Append("event: message_start\ndata: ").Append(msgStart.ToString(Formatting.None)).Append("\n\n");
+            sb.Append("event: content_block_start\ndata: ").Append(cbStart.ToString(Formatting.None)).Append("\n\n");
+            sb.Append("event: content_block_delta\ndata: ").Append(cbDelta.ToString(Formatting.None)).Append("\n\n");
+            sb.Append("event: content_block_stop\ndata: ").Append(cbStop.ToString(Formatting.None)).Append("\n\n");
+            sb.Append("event: message_delta\ndata: ").Append(msgDelta.ToString(Formatting.None)).Append("\n\n");
+            sb.Append("event: message_stop\ndata: ").Append(msgStop.ToString(Formatting.None)).Append("\n\n");
             return sb.ToString();
         }</set-body>
 											</return-response>
@@ -1257,8 +1298,8 @@ TOOL CALL HANDLING:
 										<!-- LLM Prompt Masking -->
 										<when condition="@((string)context.Variables["apiType"] == "llm" && (bool)context.Variables["hasPromptMask"] && ((string)context.Variables["scanType"] == "prompt" || (string)context.Variables["scanType"] == "both"))">
 											<set-body>@{
-            var body = (JObject)context.Variables["requestBodyJson"];
-            var result = (JObject)context.Variables["airsResult"];
+            var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
             var maskedData = result["prompt_masked_data"]["data"].ToString();
 
             // Standard messages array (Anthropic, OpenAI chat/completions)
@@ -1292,14 +1333,14 @@ TOOL CALL HANDLING:
                 }
             }
 
-            return body.ToString(Newtonsoft.Json.Formatting.None);
+            return body.ToString(Formatting.None);
         }</set-body>
 										</when>
 										<!-- Gemini Prompt Masking -->
 										<when condition="@((string)context.Variables["apiType"] == "gemini" && (bool)context.Variables["hasPromptMask"] && ((string)context.Variables["scanType"] == "prompt" || (string)context.Variables["scanType"] == "both"))">
 											<set-body>@{
-            var body = (JObject)context.Variables["requestBodyJson"];
-            var result = (JObject)context.Variables["airsResult"];
+            var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
             var maskedData = result["prompt_masked_data"]["data"].ToString();
 
             // Mask the last user content's first text part
@@ -1319,30 +1360,30 @@ TOOL CALL HANDLING:
                 }
             }
 
-            return body.ToString(Newtonsoft.Json.Formatting.None);
+            return body.ToString(Formatting.None);
         }</set-body>
 										</when>
 										<!-- MCP Tool Input Masking -->
 										<when condition="@((string)context.Variables["apiType"] == "mcp" && (bool)context.Variables["hasToolInputMask"])">
 											<set-body>@{
             try {
-                var body = (JObject)context.Variables["requestBodyJson"];
-                var result = (JObject)context.Variables["airsResult"];
+                var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
+                var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
 
                 var toolDetected = result["tool_detected"];
-                if (toolDetected == null) { return body.ToString(Newtonsoft.Json.Formatting.None); }
+                if (toolDetected == null) { return body.ToString(Formatting.None); }
 
                 var inputDetected = toolDetected["input_detected"];
-                if (inputDetected == null) { return body.ToString(Newtonsoft.Json.Formatting.None); }
+                if (inputDetected == null) { return body.ToString(Formatting.None); }
 
                 var entries = inputDetected["detection_entries"] as JArray;
-                if (entries == null || entries.Count == 0) { return body.ToString(Newtonsoft.Json.Formatting.None); }
+                if (entries == null || entries.Count == 0) { return body.ToString(Formatting.None); }
 
                 var maskedDataObj = entries[0]["masked_data"];
-                if (maskedDataObj == null) { return body.ToString(Newtonsoft.Json.Formatting.None); }
+                if (maskedDataObj == null) { return body.ToString(Formatting.None); }
 
                 var maskedData = maskedDataObj["data"]?.ToString();
-                if (string.IsNullOrEmpty(maskedData)) { return body.ToString(Newtonsoft.Json.Formatting.None); }
+                if (string.IsNullOrEmpty(maskedData)) { return body.ToString(Formatting.None); }
 
                 try {
                     body["params"]["arguments"] = JObject.Parse(maskedData);
@@ -1350,9 +1391,9 @@ TOOL CALL HANDLING:
                     body["params"]["arguments"] = maskedData;
                 }
 
-                return body.ToString(Newtonsoft.Json.Formatting.None);
+                return body.ToString(Formatting.None);
             } catch {
-                return ((JObject)context.Variables["requestBodyJson"]).ToString(Newtonsoft.Json.Formatting.None);
+                return (context.Variables.GetValueOrDefault<JObject>("requestBodyJson")).ToString(Formatting.None);
             }
         }</set-body>
 										</when>
@@ -1360,7 +1401,7 @@ TOOL CALL HANDLING:
 										<when condition="@((string)context.Variables["apiType"] == "llm" && (bool)context.Variables["hasResponseMask"] && ((string)context.Variables["scanType"] == "response" || (string)context.Variables["scanType"] == "both"))">
 											<set-body>@{
             var raw = (string)context.Variables["responseBodyRaw"];
-            var result = (JObject)context.Variables["airsResult"];
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
             var maskedData = result["response_masked_data"]["data"].ToString();
 
             // Check if this is SSE streaming format
@@ -1438,7 +1479,7 @@ TOOL CALL HANDLING:
                             }
 
                             // Reconstruct data line
-                            sb.AppendLine("data: " + chunk.ToString(Newtonsoft.Json.Formatting.None));
+                            sb.AppendLine("data: " + chunk.ToString(Formatting.None));
                         } catch {
                             // Failed to parse, keep original line
                             sb.AppendLine(line);
@@ -1488,7 +1529,7 @@ TOOL CALL HANDLING:
                     }
                 }
 
-                return body.ToString(Newtonsoft.Json.Formatting.None);
+                return body.ToString(Formatting.None);
             }
         }</set-body>
 										</when>
@@ -1496,7 +1537,7 @@ TOOL CALL HANDLING:
 										<when condition="@((string)context.Variables["apiType"] == "gemini" && (bool)context.Variables["hasResponseMask"] && ((string)context.Variables["scanType"] == "response" || (string)context.Variables["scanType"] == "both"))">
 											<set-body>@{
             var raw = (string)context.Variables["responseBodyRaw"];
-            var result = (JObject)context.Variables["airsResult"];
+            var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
             var maskedData = result["response_masked_data"]["data"].ToString();
 
             if (raw != null) {
@@ -1522,7 +1563,7 @@ TOOL CALL HANDLING:
                             }
                         }
 
-                        return chunks.ToString(Newtonsoft.Json.Formatting.None);
+                        return chunks.ToString(Formatting.None);
                     } catch {
                         return raw;
                     }
@@ -1565,9 +1606,9 @@ TOOL CALL HANDLING:
 
                             // Rebuild line with or without data: prefix
                             if (hadDataPrefix) {
-                                sb.AppendLine("data: " + chunk.ToString(Newtonsoft.Json.Formatting.None));
+                                sb.AppendLine("data: " + chunk.ToString(Formatting.None));
                             } else {
-                                sb.AppendLine(chunk.ToString(Newtonsoft.Json.Formatting.None));
+                                sb.AppendLine(chunk.ToString(Formatting.None));
                             }
                         } catch {
                             // Not valid JSON, keep original line
@@ -1599,7 +1640,7 @@ TOOL CALL HANDLING:
                                 }
                             }
 
-                            return body.ToString(Newtonsoft.Json.Formatting.None);
+                            return body.ToString(Formatting.None);
                         } catch {
                             return raw;
                         }
@@ -1638,30 +1679,30 @@ TOOL CALL HANDLING:
                     body = JObject.Parse(raw);
                 }
 
-                var result = (JObject)context.Variables["airsResult"];
+                var result = context.Variables.GetValueOrDefault<JObject>("airsResult");
                 var toolDetected = result["tool_detected"];
                 if (toolDetected == null) {
-                    return isSSE ? ("event: message\ndata: " + body.ToString(Newtonsoft.Json.Formatting.None) + "\n\n") : body.ToString(Newtonsoft.Json.Formatting.None);
+                    return isSSE ? ("event: message\ndata: " + body.ToString(Formatting.None) + "\n\n") : body.ToString(Formatting.None);
                 }
 
                 var outputDetected = toolDetected["output_detected"];
                 if (outputDetected == null) {
-                    return isSSE ? ("event: message\ndata: " + body.ToString(Newtonsoft.Json.Formatting.None) + "\n\n") : body.ToString(Newtonsoft.Json.Formatting.None);
+                    return isSSE ? ("event: message\ndata: " + body.ToString(Formatting.None) + "\n\n") : body.ToString(Formatting.None);
                 }
 
                 var entries = outputDetected["detection_entries"] as JArray;
                 if (entries == null || entries.Count == 0) {
-                    return isSSE ? ("event: message\ndata: " + body.ToString(Newtonsoft.Json.Formatting.None) + "\n\n") : body.ToString(Newtonsoft.Json.Formatting.None);
+                    return isSSE ? ("event: message\ndata: " + body.ToString(Formatting.None) + "\n\n") : body.ToString(Formatting.None);
                 }
 
                 var maskedDataObj = entries[0]["masked_data"];
                 if (maskedDataObj == null) {
-                    return isSSE ? ("event: message\ndata: " + body.ToString(Newtonsoft.Json.Formatting.None) + "\n\n") : body.ToString(Newtonsoft.Json.Formatting.None);
+                    return isSSE ? ("event: message\ndata: " + body.ToString(Formatting.None) + "\n\n") : body.ToString(Formatting.None);
                 }
 
                 var maskedData = maskedDataObj["data"]?.ToString();
                 if (string.IsNullOrEmpty(maskedData)) {
-                    return isSSE ? ("event: message\ndata: " + body.ToString(Newtonsoft.Json.Formatting.None) + "\n\n") : body.ToString(Newtonsoft.Json.Formatting.None);
+                    return isSSE ? ("event: message\ndata: " + body.ToString(Formatting.None) + "\n\n") : body.ToString(Formatting.None);
                 }
 
                 if (body?["result"]?["content"] is JArray arr && arr.Count > 0) {
@@ -1673,7 +1714,7 @@ TOOL CALL HANDLING:
                     }
                 }
 
-                return isSSE ? ("event: message\ndata: " + body.ToString(Newtonsoft.Json.Formatting.None) + "\n\n") : body.ToString(Newtonsoft.Json.Formatting.None);
+                return isSSE ? ("event: message\ndata: " + body.ToString(Formatting.None) + "\n\n") : body.ToString(Formatting.None);
             } catch {
                 // Fallback to raw response body
                 return (string)context.Variables["responseBodyRaw"] ?? "";
@@ -1691,8 +1732,8 @@ TOOL CALL HANDLING:
                 return raw ?? "";
             } else {
                 // Restore request body (inbound phase)
-                var body = (JObject)context.Variables["requestBodyJson"];
-                return body != null ? body.ToString(Newtonsoft.Json.Formatting.None) : "";
+                var body = context.Variables.GetValueOrDefault<JObject>("requestBodyJson");
+                return body != null ? body.ToString(Formatting.None) : "";
             }
         }</set-body>
 										</otherwise>
@@ -1708,11 +1749,9 @@ TOOL CALL HANDLING:
 								<!-- Fail-Closed: Block when AIRS unavailable -->
 								<when condition="@((bool)context.Variables["FailOpen"] == false)">
 									<set-variable name="errorMsg" value="@{
-                    if (!context.Variables.ContainsKey("airsResponse")) {
-                        return "AIRS API unreachable";
-                    }
+                    var response = context.Variables.GetValueOrDefault<IResponse>("airsResponse");
+                    if (response == null) { return "AIRS API unreachable"; }
 
-                    var response = (IResponse)context.Variables["airsResponse"];
                     int statusCode = (int)response.StatusCode;
 
                     try {
@@ -1739,11 +1778,11 @@ TOOL CALL HANDLING:
                                     new JProperty("code", -32603),
                                     new JProperty("message", $"🛡️ PRISMA AIRS SECURITY ALERT: Security scanner failed ({errorMsg}). Request blocked for safety.")
                                 ))
-                            ).ToString(Newtonsoft.Json.Formatting.None);
+                            ).ToString(Formatting.None);
                         } else {
                             return new JObject(
                                 new JProperty("error", $"🛡️ PRISMA AIRS SECURITY ALERT: Security scanner failed ({errorMsg}). Request blocked for safety.")
-                            ).ToString(Newtonsoft.Json.Formatting.None);
+                            ).ToString(Formatting.None);
                         }
                     }</set-body>
 									</return-response>
@@ -1755,10 +1794,9 @@ TOOL CALL HANDLING:
                         int statusCode = 0;
                         string errorDetail = "";
 
-                        if (context.Variables.ContainsKey("airsResponse")) {
-                            var response = (IResponse)context.Variables["airsResponse"];
+                        var response = context.Variables.GetValueOrDefault<IResponse>("airsResponse");
+                        if (response != null) {
                             statusCode = (int)response.StatusCode;
-
                             try {
                                 var errorBody = response.Body.As<JObject>(preserveContent: true);
                                 errorDetail = errorBody["error"]?["message"]?.ToString() ?? "";
