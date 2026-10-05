@@ -32,4 +32,12 @@ Pipe a malicious payload straight into the hook. **With a valid key it blocks**;
 
 With a valid key, a malicious input exits non-zero or prints a block decision and a benign input is silent. Unconfigured, every call warns on stderr (add `AIRS_REQUIRE_CONFIG=1` to block instead).
 
+> [!NOTE]
+> The command above pipes **straight into the engine** and proves detection — it does **not**
+> exercise Cline's hook *discovery*. Discovery is filename-based: on Windows, Cline runs the
+> `<Event>.ps1` shims in `.clinerules/hooks/` (which forward to `airs-hooks.ps1`). If the
+> engine passes this check but hooks never fire in Cline, verify the `.ps1` shims are present
+> and the master switch ("Enable lifecycle and tool hooks during task execution") is on —
+> a mis-named shim fails silently: no error, no log line.
+
 <div align="center"><sub>MIT © 2026 Palo Alto Networks &nbsp;·&nbsp; <a href="../README.md">Cline</a> &nbsp;·&nbsp; <a href="../../README.md">all agents</a></sub></div>

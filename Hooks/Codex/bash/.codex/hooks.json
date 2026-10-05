@@ -1,5 +1,5 @@
 {
-  "//": "Codex CLI. Copy .codex/ into your project (or ~/). Requires codex_hooks=true in ~/.codex/config.toml.",
+  "description": "Prisma AIRS hooks for Codex CLI. Copy .codex/ into your PROJECT (hooks are project-scope). Use ABSOLUTE command paths (hooks run with cwd = the turn directory). Requires codex_hooks=true in ~/.codex/config.toml AND a trust decision: run `codex` interactively in the project once and choose Trust (untrusted hooks are silently skipped; trust re-fires on every edit of this file). Never set async:true \u2014 async handlers cannot block.",
   "hooks": {
     "UserPromptSubmit": [
       {

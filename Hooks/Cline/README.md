@@ -11,10 +11,22 @@
 
 ## Quick start
 
-**1 · Copy the `.clinerules/` folder into your Cline project** — pick the runtime you have:
+**1 · Copy the `.clinerules/` folder into your Cline project** — pick the cell for your OS **and** runtime:
 ```bash
-cp -r nodejs/.clinerules  /path/to/your/project/      # or  bash/.clinerules  ·  powershell/.clinerules
+cp -r nodejs/.clinerules  /path/to/your/project/      # macOS/Linux (or bash/.clinerules)
+# Windows: use powershell/.clinerules — it is the ONLY cell Cline can discover on win32
 ```
+
+> [!IMPORTANT]
+> **Copying the folder is not enough — hooks are OFF until you flip Cline's master switch:**
+> Settings → **"Enable lifecycle and tool hooks during task execution"** (defaults to off).
+> Until then nothing runs and nothing is logged — the install is silently inert.
+>
+> **Discovery is by filename, per platform.** Cline on **Windows** looks for `<Event>.ps1`
+> in `.clinerules/hooks/` (anything else — extensionless, `.cmd` — is invisible), so the
+> `nodejs/` and `bash/` cells are **macOS/Linux only**. On **Windows**, per-hook toggles are
+> not implemented in Cline yet (its UI says so) — enablement is simply *file present + master
+> switch on*. On macOS/Linux, each discovered hook also has its own per-hook toggle in the UI.
 
 **2 · Set your Prisma AIRS credentials**
 ```bash

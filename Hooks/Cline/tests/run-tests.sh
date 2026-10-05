@@ -51,6 +51,25 @@ assert_all() { # label fixture event want(ALLOW|NOT_ALLOW|BLOCK|ADVISE) [vendorO
   if [ "$ok" = 1 ]; then printf '  ok   %s ->%s\n' "$label" "$seen"; else printf '  FAIL %s: want %s, got%s\n' "$label" "$want" "$seen"; FAILED=1; fi
 }
 
+# ----------------------------------------------------------------------------
+# Shim-naming gate — Cline DISCOVERS hooks by filename, per host platform:
+# win32 wants <Event>.ps1, everything else wants an extensionless executable.
+# The engine tests below pipe straight into the engines and CANNOT catch a
+# mis-named shim (the exact failure that shipped: .cmd shims = silently inert
+# on Windows). This gate asserts the shipped filenames before anything runs.
+# ----------------------------------------------------------------------------
+SHIM_EVENTS=(UserPromptSubmit PreToolUse PostToolUse TaskComplete)
+for ev in "${SHIM_EVENTS[@]}"; do
+  [ -f "$HERE/../powershell/$CFG/hooks/$ev.ps1" ] || { echo "  FAIL shim naming: powershell cell must ship $ev.ps1 (win32 discovery)"; FAILED=1; }
+  for cell in nodejs bash; do
+    [ -f "$HERE/../$cell/$CFG/hooks/$ev" ] || { echo "  FAIL shim naming: $cell cell must ship extensionless $ev (unix discovery)"; FAILED=1; }
+    [ -x "$HERE/../$cell/$CFG/hooks/$ev" ] || { echo "  FAIL shim naming: $cell/$ev must be executable (0755)"; FAILED=1; }
+  done
+done
+stray="$(find "$HERE/../powershell/$CFG/hooks" -name '*.cmd' 2>/dev/null)"
+[ -n "$stray" ] && { echo "  FAIL shim naming: stray .cmd shim(s) — invisible to Cline on every platform: $stray"; FAILED=1; }
+[ "$FAILED" = 0 ] && echo "  ok   shim naming: powershell=<Event>.ps1, nodejs/bash=extensionless+exec"
+
 echo "== Cline [$MODE] runtimes: ${RUNTIMES[*]:-none} =="
 if [ ${#MISSING[@]} -gt 0 ]; then
   echo "   MISSING RUNTIME(S): ${MISSING[*]}"

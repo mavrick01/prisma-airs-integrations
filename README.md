@@ -28,16 +28,22 @@ This repository collects example configurations, sample code, and reference patt
 | [Hooks: Cline](./Hooks/Cline/) | AI Coding Assistant | ✅ | ✅ | ❌ | ✅ | ✅ |
 | [Hooks: Devin](./Hooks/Devin/) | AI Coding Assistant | ⚠️ | ❌ | ❌ | ✅ | ⚠️ |
 | [Hooks: Gemini CLI](./Hooks/GeminiCLI/) | AI Coding Assistant | ✅ | ⚠️ | ❌ | ✅ | ✅ |
+| [Hooks: Grok Build](./Hooks/GrokBuild/) | AI Coding Assistant | ✅ | ⚠️ | ❌ | ✅ | ⚠️ |
 | [Microsoft (Azure APIM)](./Microsoft/azure-apim/) | API Gateway | ✅ | ✅ | ✅ | ❌ | ✅ |
 | [Google (Apigee)](./Google/apigee/) | API Gateway | ✅ | ✅ | ❌ | ❌ | ❌ |
 | [Google (Apigee SharedFlow)](./Google/apigee/sharedflow/) | API Gateway | ✅ | ✅ | ❌ | ❌ | ❌ |
 | [Kong (Custom Plugin v1)](./Kong/custom-plugin/) | API Gateway | ✅ | ✅ | ❌ | ❌ | ❌ |
 | [Kong (Custom Plugin v2 — MCP + buffered SSE)](./Kong/custom-plugin-v2/) | API Gateway | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [Kong (Request Callout)](./Kong/request-callout/) | API Gateway | ✅ | ❌ | ❌ | ❌ | ❌ |
+| [Kong (AI Gateway 2.x Policies)](./Kong/ai-gateway/) | API Gateway | ✅ | ✅ | ❌ | ⚠️ | ❌ |
 | [LiteLLM](./LiteLLM/) | AI Gateway | ✅ | ✅ | ⚠️ | ✅ | ❌ |
+| [Bifrost](./Bifrost/) | AI Gateway | ✅ | ✅ | ⚠️ | ❌ | ❌ |
 | [n8n](./n8n/) | Workflow Automation | ✅ | ✅ | ❌ | ❌ | ❌ |
-| [Portkey](./Portkey/) | AI Gateway | ✅ | ✅ | ❌ | ❌ | ❌ |
 | [TrueFoundry](./TrueFoundry/) | AI Gateway | ✅ | ✅ | ⚠️ | ❌ | ❌ |
+| [AWS (Lambda Decorator)](./AWS/lambda-decorator/) | Serverless Compute | ✅ | ✅ | ❌ | ❌ | ❌ |
+| [AWS (Bedrock SDK Hooks — Python · Node.js · Java · Go)](./AWS/bedrock-sdk-hooks/) | AI SDK | ✅ | ✅ | ⚠️ | ❌ | ❌ |
+| [AWS (Bedrock AgentCore)](./AWS/bedrock-agentcore/) | Agent Runtime | ✅ | ✅ | ⚠️ | ✅ | ✅ |
+| [AWS (Strands Agents)](./AWS/strands-agents/) | Agent Framework | ✅ | ⚠️ | ⚠️ | ✅ | ✅ |
 | [GitHub (Actions)](./GitHub/github-actions/) | CI/CD Pipeline | N/A | N/A | N/A | N/A | N/A |
 | [Jenkins (Pipeline)](./Jenkins/declarative-pipeline/) | CI/CD Pipeline | N/A | N/A | N/A | N/A | N/A |
 

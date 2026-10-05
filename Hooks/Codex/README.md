@@ -48,8 +48,8 @@ Each folder is self-contained (engine + wiring + `.codex/`). Shared `example.env
 
 <div align="center"><sub>✅ hard-block &nbsp;·&nbsp; ⚠️ scan + alert / redact &nbsp;·&nbsp; ❌ no usable surface in the hook contract</sub></div>
 
-> [!WARNING]
-> **Codex enforcement is contract-derived — not yet validated on a live Codex CLI.** The ✅ marks reflect the engine emitting Codex's documented block wire format (exit 2 via `.codex/hooks.json`), but the hard-block has **not** been confirmed end-to-end against a real Codex client, and Codex's docs on its deny mechanism are ambiguous (several Claude-style fields are documented as accepted-but-fail-open). Treat **pre-tool hard-block as pending live validation**; confirm with `tests/run-tests.sh live` against a real Codex session before relying on it.
+> [!IMPORTANT]
+> **Validated against Codex CLI 0.150.0 (live + source).** A live 0.150.0 session measured the previous exit-2 prompt block being reported as `hook (failed) — hook exited with code 1` and answered anyway: Codex reads its **shell wrapper's** exit status verbatim (a PowerShell-style wrapper collapses any child failure to 1), and every exit code other than 0/2 is a hook *failure* = **fail-open**. The engines now block via the stdout-JSON forms Codex's own integration suite pins (`codex-rs` tag `rust-v0.150.0`): `{"decision":"block","reason":…}` on `UserPromptSubmit`/`PostToolUse`, `permissionDecision:"deny"` on `PreToolUse`, `{"continue":false}` on `Stop` — always exit 0, stdout carrying nothing but the JSON. Three Codex-side gates still apply and are called out below: hooks must be **trusted** (interactive prompt; re-fires when `hooks.json` changes), **synchronous** (`async:true` can never block), and the `hooks.json` must parse (Codex rejects unknown keys — including `"//"` comment keys — and discards the whole file with a one-line warning). Warnings ride `{"systemMessage":…}` — stderr is ignored on exit 0. Re-run `tests/run-tests.sh live` after any Codex CLI upgrade; the wire contract is version-measured, not guaranteed.
 ```mermaid
 flowchart LR
     P["Prompt<br/>🛡️ block"] --> T["Tool call<br/>🛡️ block"]
@@ -62,7 +62,7 @@ flowchart LR
 
 <br>
 
-Codex CLI reads hooks from `.codex/hooks.json` on the Claude-compatible contract: the engine scans the prompt on input, the model's answer on `Stop`, and tool input/output as a `tool_event` (`tools/call`) for **indirect prompt injection**, and renders a block as **exit code 2** on `PreToolUse`. **Caveat — pending live validation:** this hard-block is **contract-derived, not yet verified against a live Codex CLI**, and Codex's own docs on which deny fields it honors are ambiguous (some Claude-style fields are documented as accepted-but-fail-open). Until a live Codex block is confirmed (`tests/run-tests.sh live`), treat pre-tool enforcement as unproven.
+Codex CLI reads hooks from the project's `.codex/hooks.json`: the engine scans the prompt on input, the model's answer on `Stop`, and tool input/output as a `tool_event` (`tools/call`) for **indirect prompt injection**. Blocks are rendered as **stdout JSON on exit 0** (never exit 2 — Codex reports its shell wrapper's exit status, and any code other than 0/2 fails open as a hook *failure*). The forms match Codex's own integration fixtures at `rust-v0.150.0`: a blocked prompt produces **zero model requests** and a red `UserPromptSubmit hook (blocked)` cell. Requires `codex_hooks = true`, a **trust** decision (interactive; re-fires on every `hooks.json` edit), and synchronous handlers. Known Codex-side limits, measured: the **VS Code extension does not run hooks at all** (CLI-only today), and `codex exec` skips hooks silently unless trust was persisted or `--dangerously-bypass-hook-trust` is passed.
 </details>
 
 <div align="center">
