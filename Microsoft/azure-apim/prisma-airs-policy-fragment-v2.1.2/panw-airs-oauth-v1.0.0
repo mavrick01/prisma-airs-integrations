@@ -63,9 +63,9 @@ CACHING STRATEGY:
      ============================================================================ -->
 	<!-- Try to load a cached AIRS OAuth token. Key is scoped to TSG so multiple
 	     TSGs on the same gateway don't share tokens. -->
-	<cache-lookup-value key="@("panw-airs-oauth-token-" + "{{panw-tsg}}")" variable-name="PrismaAirsToken" />
+	<cache-lookup-value key="@(&quot;panw-airs-oauth-token-&quot; + &quot;{{panw-tsg}}&quot;)" variable-name="PrismaAirsToken" />
 	<choose>
-		<when condition="@(context.Variables.GetValueOrDefault<string>("PrismaAirsToken") != null)">
+		<when condition="@(context.Variables.GetValueOrDefault&lt;string&gt;(&quot;PrismaAirsToken&quot;) != null)">
 			<!-- Cache hit — token is still valid, nothing to do -->
 		</when>
 		<otherwise>
@@ -75,7 +75,7 @@ CACHING STRATEGY:
              ============================================================================ -->
 			<!-- Step 1: Exchange service account credentials for an SCM bearer token.
 			     Uses HTTP Basic auth (client_id:client_secret) with form-encoded body. -->
-			<http-send-request response-variable-name="scmAuthResponse" timeout="15" ignore-error="true">
+			<send-request mode="new" response-variable-name="scmAuthResponse" timeout="15" ignore-error="true">
 				<set-url>https://auth.apps.paloaltonetworks.com/oauth2/access_token</set-url>
 				<set-method>POST</set-method>
 				<set-header name="Content-Type" exists-action="override">
@@ -89,11 +89,11 @@ CACHING STRATEGY:
             return "Basic " + encoded;
         }</value>
 				</set-header>
-				<set-body>@("grant_type=client_credentials&scope=tsg_id:" + "{{panw-tsg}}")</set-body>
-			</http-send-request>
+				<set-body>@("grant_type=client_credentials&amp;scope=tsg_id:" + "{{panw-tsg}}")</set-body>
+			</send-request>
 			<!-- Validate SCM auth response -->
 			<choose>
-				<when condition="@(context.Variables.GetValueOrDefault<IResponse>("scmAuthResponse")?.StatusCode != 200)">
+				<when condition="@(context.Variables.GetValueOrDefault&lt;IResponse&gt;(&quot;scmAuthResponse&quot;)?.StatusCode != 200)">
 					<!-- SCM auth failed — return a clear error rather than a cryptic 500 -->
 					<return-response>
 						<set-status code="502" reason="Bad Gateway" />
@@ -101,21 +101,21 @@ CACHING STRATEGY:
 							<value>application/json</value>
 						</set-header>
 						<set-body>@{
-                int code = context.Variables.GetValueOrDefault<IResponse>("scmAuthResponse")?.StatusCode ?? 0;
+                int code = context.Variables.GetValueOrDefault&lt;IResponse&gt;("scmAuthResponse")?.StatusCode ?? 0;
                 return new JObject(
                     new JProperty("error", $"🛡️ PRISMA AIRS: SCM authentication failed (HTTP {code}). Check panw-client-id, panw-client-secret, and panw-tsg named values.")
-                ).ToString(Formatting.None);
+                ).ToString(Newtonsoft.Json.Formatting.None);
             }</set-body>
 					</return-response>
 				</when>
 			</choose>
 			<!-- Extract SCM access_token from response -->
 			<set-variable name="scmAccessToken" value="@{
-            var body = context.Variables.GetValueOrDefault<IResponse>("scmAuthResponse").Body.As<JObject>(preserveContent: true);
-            return body["access_token"]?.ToString();
+            var body = context.Variables.GetValueOrDefault&lt;IResponse&gt;(&quot;scmAuthResponse&quot;).Body.As&lt;JObject&gt;(preserveContent: true);
+            return body[&quot;access_token&quot;]?.ToString();
         }" />
 			<choose>
-				<when condition="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault<string>("scmAccessToken")))">
+				<when condition="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault&lt;string&gt;(&quot;scmAccessToken&quot;)))">
 					<return-response>
 						<set-status code="502" reason="Bad Gateway" />
 						<set-header name="Content-Type" exists-action="override">
@@ -133,7 +133,7 @@ CACHING STRATEGY:
 			     existing named value rather than duplicating it as panw-client-app).
 			     panw-customer-app → "customer_app", must match the Application name exactly
 			     as defined in the AIRS API Application definition. -->
-			<http-send-request response-variable-name="airsOauthResponse" timeout="15" ignore-error="true">
+			<send-request mode="new" response-variable-name="airsOauthResponse" timeout="15" ignore-error="true">
 				<set-url>https://api.sase.paloaltonetworks.com/aisec/v1/mgmt/oauth/client_credential/accesstoken?tokenTtlInterval=3&amp;tokenTtlUnit=hours</set-url>
 				<set-method>POST</set-method>
 				<set-header name="Content-Type" exists-action="override">
@@ -143,37 +143,37 @@ CACHING STRATEGY:
 					<value>application/json</value>
 				</set-header>
 				<set-header name="Authorization" exists-action="override">
-					<value>@("Bearer " + context.Variables.GetValueOrDefault<string>("scmAccessToken"))</value>
+					<value>@("Bearer " + context.Variables.GetValueOrDefault&lt;string&gt;("scmAccessToken"))</value>
 				</set-header>
 				<set-body>@{
             return new JObject(
                 new JProperty("client_id", "{{airs-api}}"),
                 new JProperty("customer_app", "{{panw-customer-app}}")
-            ).ToString(Formatting.None);
+            ).ToString(Newtonsoft.Json.Formatting.None);
         }</set-body>
-			</http-send-request>
+			</send-request>
 			<!-- Validate AIRS OAuth response -->
 			<choose>
-				<when condition="@(context.Variables.GetValueOrDefault<IResponse>("airsOauthResponse")?.StatusCode != 200)">
+				<when condition="@(context.Variables.GetValueOrDefault&lt;IResponse&gt;(&quot;airsOauthResponse&quot;)?.StatusCode != 200)">
 					<return-response>
 						<set-status code="502" reason="Bad Gateway" />
 						<set-header name="Content-Type" exists-action="override">
 							<value>application/json</value>
 						</set-header>
 						<set-body>@{
-                int code = context.Variables.GetValueOrDefault<IResponse>("airsOauthResponse")?.StatusCode ?? 0;
+                int code = context.Variables.GetValueOrDefault&lt;IResponse&gt;("airsOauthResponse")?.StatusCode ?? 0;
                 return new JObject(
                     new JProperty("error", $"🛡️ PRISMA AIRS: AIRS OAuth token fetch failed (HTTP {code}). Check airs-api / panw-customer-app named values and SCM service account permissions.")
-                ).ToString(Formatting.None);
+                ).ToString(Newtonsoft.Json.Formatting.None);
             }</set-body>
 					</return-response>
 				</when>
 			</choose>
 			<!-- Extract AIRS token and TTL from response -->
-			<set-variable name="airsOauthBody" value="@(context.Variables.GetValueOrDefault<IResponse>("airsOauthResponse").Body.As<JObject>(preserveContent: true))" />
-			<set-variable name="PrismaAirsToken" value="@(context.Variables.GetValueOrDefault<JObject>("airsOauthBody")?["access_token"]?.ToString())" />
+			<set-variable name="airsOauthBody" value="@(context.Variables.GetValueOrDefault&lt;IResponse&gt;(&quot;airsOauthResponse&quot;).Body.As&lt;JObject&gt;(preserveContent: true))" />
+			<set-variable name="PrismaAirsToken" value="@(context.Variables.GetValueOrDefault&lt;JObject&gt;(&quot;airsOauthBody&quot;)?[&quot;access_token&quot;]?.ToString())" />
 			<choose>
-				<when condition="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault<string>("PrismaAirsToken")))">
+				<when condition="@(string.IsNullOrEmpty(context.Variables.GetValueOrDefault&lt;string&gt;(&quot;PrismaAirsToken&quot;)))">
 					<return-response>
 						<set-status code="502" reason="Bad Gateway" />
 						<set-header name="Content-Type" exists-action="override">
@@ -191,13 +191,13 @@ CACHING STRATEGY:
 			     Falls back to 7200 (2h) if expires_in is absent or unparseable, which is
 			     conservative for the 3-hour token we requested. -->
 			<set-variable name="airsOauthCacheTtl" value="@{
-            string raw = context.Variables.GetValueOrDefault<JObject>("airsOauthBody")?["expires_in"]?.ToString();
-            if (int.TryParse(raw, out int expiresIn) && expiresIn > 3600) {
+            string raw = context.Variables.GetValueOrDefault&lt;JObject&gt;(&quot;airsOauthBody&quot;)?[&quot;expires_in&quot;]?.ToString();
+            if (int.TryParse(raw, out int expiresIn) &amp;&amp; expiresIn &gt; 3600) {
                 return expiresIn - 3600;
             }
             return 7200;
         }" />
-			<cache-store-value key="@("panw-airs-oauth-token-" + "{{panw-tsg}}")" value="@(context.Variables.GetValueOrDefault<string>("PrismaAirsToken"))" duration="@((int)context.Variables["airsOauthCacheTtl"])" />
+			<cache-store-value key="@(&quot;panw-airs-oauth-token-&quot; + &quot;{{panw-tsg}}&quot;)" value="@(context.Variables.GetValueOrDefault&lt;string&gt;(&quot;PrismaAirsToken&quot;))" duration="@((int)context.Variables[&quot;airsOauthCacheTtl&quot;])" />
 		</otherwise>
 	</choose>
 </fragment>
